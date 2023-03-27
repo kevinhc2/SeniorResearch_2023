@@ -6,8 +6,6 @@ import time
 with open('coco.names', 'r') as f:
     classes = [line.strip() for line in f.readlines()]
 
-print(classes)
-
 COLORS = np.random.uniform(0, 255, size=(len(classes), 3))
 
 net = cv2.dnn.readNet('yolov3.weights', 'yolov3.cfg')
@@ -19,10 +17,6 @@ def detect_objects(img):
     return outs
 
 def get_output_layers(net):
-    # layer_names = net.getLayerNames()
-    # try: output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
-    # except: output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
-    # return output_layers
     return net.getUnconnectedOutLayersNames()
 
 def draw_prediction(img, class_id, x, y, x_plus_w, y_plus_h):
@@ -40,9 +34,9 @@ def display_preds(img, preds):
 
     classes_found = dict()
     focus_id = None
-    global focus_mode, current_poi
+    global focus_mode, current_ooi
 
-    for pred in preds: # clean up this part for focus mode vs not focus mode
+    for pred in preds: 
         for detection in pred:
             scores = detection[5:]
             class_id = np.argmax(scores)
@@ -58,15 +52,14 @@ def display_preds(img, preds):
                 confidences.append(float(confidence))
                 boxes.append([x, y, w, h])
                 classes_found[class_id] = ([x, y, w, h], confidence)
-    
-    print(classes_found)
+
     nms_thresh = 0.4
     indices = cv2.dnn.NMSBoxes(boxes, confidences, c_thresh, nms_thresh)
     detected_objects = []
     coordinates = []
 
     if focus_mode:
-        focus_name = current_poi[0]
+        focus_name = current_ooi[0]
         focus_id = classes.index(focus_name)
         if focus_id in classes_found:
             box = classes_found[focus_id][0]
@@ -99,69 +92,59 @@ def display_preds(img, preds):
 
     return detected_objects, coordinates, img
 
-def followFace(tello, rect, frameMiddle, prevError):
-    droneMinDist = 6800
-    droneMaxDist = 6200
-    x1, y1 = rect[0]
-    x2, y2 = rect[1]
-    x = (x1+x2)//2 #get x pos of rect
-    error = x-frameMiddle//2 #how far away is the face from the center of the screen?
-    pid = [0.4, 0.4, 0]
+def follow_object(tello, x, y, cur_width, cur_height):
+    #for metrics if they are within certain number keep same
+    # 1 is false
+    #-1 is true
+    width_s = abs(ooi_start_coors[1][0]-ooi_start_coors[0][0])
+    default_x = ooi_start_coors[0][0]
+    default_y = ooi_start_coors[0][1]
+    closer = 0
+    left = 0
+    up = 0
+    if(cur_width > 1.2 * width_s or cur_width < 0.8 * width_s):
+        closer = 100 * ((cur_width - width_s) // frame_w)
+    if(x < 0.8 * default_x or x > 1.2 * default_x):
+        left = 100 * ((x - default_x) // frame_w)
+    if(y > 1.2 * default_y or y < 0.8 * default_y):
+        up = 100 * ((y - default_y) // frame_w)
+    tello.send_rc_control(left, closer, up, 0)
     
-    #complicated error stuff
-    speed = pid[0]*error + pid[1]*(error-prevError)
-    speed = int(np.clip(speed, -100, 100))
-
-    # rectArea = rect[1] #get area of rect 
-    rectArea = abs((x2-x1)*(y2-y1)) 
-    if rectArea > droneMinDist: #if too close, move back 
-        moveDist = -20
-    elif rectArea < droneMaxDist and rectArea != 0: #if too far, move foward
-        moveDist = 20
-    else: #within acceptable range
-        moveDist = 0
-    
-    if x == 0:
-        speed = 0
-        error = 0
-
-    tello.send_rc_control(0, moveDist, 0, speed)
-    return error 
-
-def check_click(mouse_x, mouse_y, objs, coors):
-    global focus_mode, current_poi
+def check_click(mouse_x, mouse_y, objs, coor_list):
+    global focus_mode, current_ooi, ooi_start_coors
     if focus_mode:
         focus_mode = False
     else:
         for i in range(len(objs)):
-            points = coors[i]
-            x0, y0 = points[0]
-            x1, y1 = points[1]
+            coors = coor_list[i]
+            x0, y0 = coors[0]
+            x1, y1 = coors[1]
             if (mouse_x > x0 and mouse_x < x1) and (mouse_y > y0 and mouse_y < y1):
-                print(objs[i][0])
-                current_poi = objs[i]
+                current_ooi = objs[i]
+                ooi_start_coors = [(x0, y0), (x1, y1)]
                 focus_mode = True
                 break
 
 def onMouse(event, x, y, flags, param):
     if event == cv2.EVENT_LBUTTONDOWN:
-        print("x: " + str(x) + ", y: " + str(y))
+        # print("x: " + str(x) + ", y: " + str(y))
         check_click(x, y, detected_objs, coors)
         
 cv2.namedWindow('test', cv2.WINDOW_AUTOSIZE)
 cv2.setMouseCallback('test', onMouse)
 focus_mode = False
-current_poi = None
-prevErr = 0
+current_ooi = None
+ooi_start_coors = None
 frame_w = cv2.getWindowImageRect('test')[2]
-print(frame_w)
 
 tello = Tello()
 tello.connect()
 tello.streamon()
 tello.takeoff()
-tello.send_rc_control(0,0,15,0)
-time.sleep(2)
+tello.send_rc_control(0, 0, 15, 0)
+time.sleep(4)
+tello.send_rc_control(0, 0, 0, 0)
+print(tello.get_battery())
 
 while True:
     frame = tello.get_frame_read().frame
@@ -169,11 +152,17 @@ while True:
     detected_objs, coors, frame = display_preds(frame, outs)
     cv2.imshow('test', frame)
     if focus_mode and len(detected_objs) != 0:
-        prevErr = followFace(tello, coors[0], frame_w, prevErr)
+        rect = coors[0]
+        print(rect)
+        x1, y1 = rect[0]
+        x2, y2 = rect[1]
+        follow_object(tello, x1, y1, abs(x2-x1), abs(y2-y1))
+        
     key = cv2.waitKey(25)
     if key == 27: # escape key
         break
-        
-# tello.streamoff()
-tello.end()
+    tello.send_control_command('command')
+
 cv2.destroyAllWindows()
+tello.land()
+tello.streamoff()
